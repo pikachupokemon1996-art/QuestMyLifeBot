@@ -10,6 +10,7 @@ from google.genai import types
 
 from prompts import SYSTEM_PROMPT
 
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -17,6 +18,7 @@ if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN")
 if not GEMINI_API_KEY:
     raise RuntimeError("Не задан GEMINI_API_KEY")
+
 
 app = FastAPI(title="Квестификатор")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -41,30 +43,9 @@ def clean_plain_text(text: str) -> str:
     return text.strip()
 
 
-def split_text(text: str, limit: int = 3800) -> list[str]:
-    text = clean_plain_text(text)
-    if len(text) <= limit:
-        return [text]
-
-    parts, current = [], ""
-    for paragraph in text.split("\n"):
-        candidate = f"{current}\n{paragraph}".strip() if current else paragraph
-        if len(candidate) <= limit:
-            current = candidate
-            continue
-
-        if current:
-            parts.append(current)
-
-        while len(paragraph) > limit:
-            parts.append(paragraph[:limit])
-            paragraph = paragraph[limit:]
-
-        current = paragraph
-
-    if current:
-        parts.append(current)
-    return parts
+def quest_is_complete(text: str) -> bool:
+    required = ("⚔️", "📜", "🎯", "🏆")
+    return all(marker in text for marker in required)
 
 
 def quest_keyboard() -> dict:
@@ -87,9 +68,11 @@ def start_keyboard() -> dict:
 
 async def telegram_call(method: str, payload: dict | None = None) -> dict:
     last_error = None
+
     for delay in (0, 2, 5):
         if delay:
             await asyncio.sleep(delay)
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -101,20 +84,29 @@ async def telegram_call(method: str, payload: dict | None = None) -> dict:
 
             if not data.get("ok"):
                 raise RuntimeError(f"Telegram API error: {data}")
+
             return data
+
         except Exception as exc:
             last_error = exc
 
     raise last_error
 
 
-async def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> None:
-    parts = split_text(text)
-    for index, part in enumerate(parts):
-        payload = {"chat_id": chat_id, "text": part}
-        if reply_markup and index == len(parts) - 1:
-            payload["reply_markup"] = reply_markup
-        await telegram_call("sendMessage", payload)
+async def send_message(
+    chat_id: int,
+    text: str,
+    reply_markup: dict | None = None,
+) -> None:
+    payload = {
+        "chat_id": chat_id,
+        "text": clean_plain_text(text)[:4000],
+    }
+
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    await telegram_call("sendMessage", payload)
 
 
 async def send_chat_action(chat_id: int) -> None:
@@ -153,6 +145,7 @@ async def remove_keyboard(chat_id: int, message_id: int) -> None:
 
 async def call_ai(prompt: str) -> str:
     last_error = None
+
     for delay in (0, 2, 5, 10):
         if delay:
             await asyncio.sleep(delay)
@@ -163,17 +156,20 @@ async def call_ai(prompt: str) -> str:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
-                    temperature=0.8,
-                    max_output_tokens=900,
+                    temperature=0.75,
+                    max_output_tokens=1400,
                 ),
             )
+
             if not response.text:
                 raise RuntimeError("Gemini вернул пустой ответ")
+
             return clean_plain_text(response.text)
 
         except Exception as exc:
             last_error = exc
             message = str(exc).lower()
+
             if any(
                 marker in message
                 for marker in (
@@ -190,34 +186,69 @@ async def call_ai(prompt: str) -> str:
 
 
 async def generate_quest(task: str) -> str:
-    return await call_ai(
-        "Преврати эту обычную задачу в короткий добрый RPG-квест:\n\n"
+    prompt = (
+        "Преврати эту обычную задачу в маленький добрый RPG-квест:\n\n"
         f"{task}\n\n"
-        "Главное: человек должен улыбнуться, быстро понять, что делать, "
-        "и пойти выполнять дело. Не усложняй задачу."
+        "Ответ ОБЯЗАТЕЛЬНО должен содержать все четыре блока: "
+        "⚔️ название, 📜 легенда, 🎯 план, 🏆 награда. "
+        "Не заканчивай ответ, пока не написал награду. "
+        "План — ровно 3 коротких шага. "
+        "Весь ответ — примерно 8–12 коротких строк."
     )
+
+    answer = await call_ai(prompt)
+
+    if quest_is_complete(answer):
+        return answer
+
+    # Один дополнительный запрос, если модель оборвала ответ.
+    answer = await call_ai(
+        prompt
+        + "\n\nПредыдущая попытка была неполной. "
+          "Сейчас верни ЦЕЛЫЙ квест одним сообщением и обязательно закончи блоком 🏆 Награда."
+    )
+
+    return answer if quest_is_complete(answer) else fallback_quest(task)
 
 
 async def make_epic(quest_text: str) -> str:
-    return await call_ai(
-        "Сделай этот квест заметно эпичнее и смешнее, но всё ещё коротко. "
-        "Не добавляй новых реальных обязанностей: меняй только художественную подачу.\n\n"
-        f"{quest_text}"
+    prompt = (
+        "Сделай этот квест смешнее и эпичнее, но не длиннее исходного. "
+        "Не добавляй человеку новых реальных обязанностей. "
+        "Меняй только художественную подачу.\n\n"
+        "ОБЯЗАТЕЛЬНО сохрани четыре блока: "
+        "⚔️ название, 📜 легенда, 🎯 план, 🏆 награда. "
+        "План — ровно 3 коротких шага. "
+        "Не заканчивай ответ до награды.\n\n"
+        f"Исходный квест:\n{quest_text}"
     )
+
+    answer = await call_ai(prompt)
+
+    if quest_is_complete(answer):
+        return answer
+
+    answer = await call_ai(
+        prompt
+        + "\n\nВерни полный вариант заново одним сообщением. "
+          "Обязательно закончи блоком 🏆 Награда."
+    )
+
+    return answer if quest_is_complete(answer) else quest_text
 
 
 def fallback_quest(task: str) -> str:
     return (
         f"⚔️ Квест: «{task}»\n\n"
         "📜 Легенда:\n"
-        "Сегодняшний противник маскируется под обычное дело. "
-        "К счастью, у него есть слабое место: его можно просто начать.\n\n"
+        "Обычное дело сегодня решило притвориться мини-боссом. "
+        "Плохая новость: оно существует. Хорошая: победить его вполне реально.\n\n"
         "🎯 План:\n"
         "1. Подготовь всё нужное.\n"
-        "2. Сделай основную часть.\n"
-        "3. Быстро проверь результат и закрой квест.\n\n"
+        "2. Сделай основную часть дела.\n"
+        "3. Оглянись на результат и закрой миссию.\n\n"
         "🏆 Награда:\n"
-        "Чистая совесть, маленькая победа и +1 к бытовой легендарности ✨"
+        "+1 к бытовой легендарности и заслуженное чувство «ну вот и всё» ✨"
     )
 
 
@@ -238,7 +269,7 @@ async def handle_message(message: dict) -> None:
                 "• разобрать шкаф\n"
                 "• помыть посуду\n"
                 "• сходить в магазин\n"
-                "• подготовить конспект"
+                "• заправить кровать"
             ),
             start_keyboard(),
         )
@@ -249,8 +280,8 @@ async def handle_message(message: dict) -> None:
             chat_id,
             (
                 "⚔️ Просто напиши дело обычными словами.\n\n"
-                "Я добавлю немного приключения, короткий план и смешную награду. "
-                "Никаких регистраций, профилей и таблиц прогресса."
+                "Я добавлю немного приключения, три коротких шага "
+                "и смешную художественную награду."
             ),
         )
         return
@@ -287,7 +318,7 @@ async def handle_callback(callback: dict) -> None:
 
         await send_message(
             chat_id,
-            "🎉 Квест закрыт. Мир снова в безопасности.\n✨ +1 к легендарности.",
+            "🎉 Квест закрыт. Мир переживёт этот день.\n✨ +1 к легендарности.",
         )
         return
 
@@ -305,7 +336,7 @@ async def handle_callback(callback: dict) -> None:
         except Exception:
             await send_message(
                 chat_id,
-                "🔥 Сегодня магия усиления капризничает. Сам квест всё равно действителен.",
+                "🔥 Магия усиления сегодня капризничает. Сам квест всё равно действителен.",
             )
             return
 
