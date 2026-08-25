@@ -46,7 +46,27 @@ def clean_plain_text(text: str) -> str:
 
 def quest_is_complete(text: str) -> bool:
     required = ("⚔️", "📜", "🎯", "🏆")
-    return all(marker in text for marker in required)
+
+    # Все четыре блока должны присутствовать и идти в правильном порядке.
+    positions = [text.find(marker) for marker in required]
+    if any(position == -1 for position in positions):
+        return False
+    if positions != sorted(positions):
+        return False
+
+    # Одного значка 🏆 недостаточно: после него должна быть
+    # законченная художественная награда, а не обрыв вроде "🏆 На".
+    reward = text.split("🏆", 1)[1].strip()
+    reward = re.sub(
+        r"^(?:награда\s*:?)?\s*",
+        "",
+        reward,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9+]+", reward)
+
+    return len(reward) >= 12 and len(words) >= 3
 
 
 def quest_keyboard() -> dict:
