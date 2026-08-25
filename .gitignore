@@ -1,7 +1,9 @@
 .env
+.env.*
+!.env.example
 venv/
 .venv/
 __pycache__/
 *.pyc
 users.json
-bot_local_old.py
+.vercel/
