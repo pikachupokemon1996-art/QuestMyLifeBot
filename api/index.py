@@ -22,6 +22,14 @@ if not GEMINI_API_KEY:
 app = FastAPI(title="Квестификатор")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 TEACHER_ID = 328761045
+OWNER_ID = 5517738880
+ALLOWED_USER_IDS = {OWNER_ID, TEACHER_ID}
+
+DEMO_LOCK_MESSAGE = (
+    "🔒 Квестификатор сейчас работает в режиме учебной демонстрации.\n"
+    "Генерация квестов доступна автору проекта и преподавателю."
+)
+
 MODEL_NAME = "gemini-3.6-flash"
 WEBHOOK_SECRET = hashlib.sha256(
     (TELEGRAM_BOT_TOKEN + "-questificator").encode("utf-8")
@@ -235,6 +243,10 @@ async def handle_message(message: dict) -> None:
         await send_message(chat_id, f"Твой Telegram ID: {user_id}")
         return
 
+    if user_id not in ALLOWED_USER_IDS:
+        await send_message(chat_id, DEMO_LOCK_MESSAGE)
+        return
+
     if text == "/profile":
         await send_message(chat_id,
             "🧙 Онлайн-версия Квестификатора работает на Vercel.\n\n"
@@ -264,6 +276,10 @@ async def handle_callback(callback: dict) -> None:
 
     await answer_callback(callback_id)
     if not chat_id:
+        return
+
+    if user_id not in ALLOWED_USER_IDS:
+        await send_message(chat_id, DEMO_LOCK_MESSAGE)
         return
 
     if data == "new":
